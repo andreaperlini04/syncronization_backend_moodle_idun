@@ -1,0 +1,27 @@
+# Bytecode / cache Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Ambiente virtuale
+venv/
+.venv/
+env/
+
+# Database SQLite generato a runtime (non va versionato)
+sessions/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Variabili d'ambiente / config locale
+.env
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+
+# Log
+*.log
