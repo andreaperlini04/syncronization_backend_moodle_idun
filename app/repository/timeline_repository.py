@@ -30,10 +30,20 @@ class TimelineRepository:
                     source      TEXT    NOT NULL,
                     event_type  TEXT    NOT NULL,
                     payload     TEXT    NOT NULL,
+                    description TEXT    NOT NULL DEFAULT '',
                     UNIQUE(session_id, source, event_type, ts)
                 )
                 """
             )
+            # Migrazione idempotente: se la tabella esiste già da prima
+            # dell'introduzione di questa colonna, aggiungerla qui. SQLite
+            # non supporta "ADD COLUMN IF NOT EXISTS", quindi si tenta e si
+            # ignora l'errore se la colonna c'è già.
+            try:
+                conn.execute("ALTER TABLE timeline ADD COLUMN description TEXT NOT NULL DEFAULT ''")
+            except sqlite3.OperationalError:
+                pass
+
             # NB: in SQLite, righe con session_id = NULL sono considerate
             # sempre distinte dal vincolo UNIQUE (NULL != NULL), quindi gli
             # eventi fuori sessione non vengono mai scartati per errore.
@@ -46,8 +56,8 @@ class TimelineRepository:
         with self._lock, self._connect() as conn:
             cur = conn.execute(
                 "INSERT OR IGNORE INTO timeline "
-                "(session_id, ts, source, event_type, payload) VALUES (?, ?, ?, ?, ?)",
-                (entry.session_id, entry.ts, entry.source, entry.event_type, entry.payload),
+                "(session_id, ts, source, event_type, payload, description) VALUES (?, ?, ?, ?, ?, ?)",
+                (entry.session_id, entry.ts, entry.source, entry.event_type, entry.payload, entry.description),
             )
             return cur.rowcount
 
@@ -56,11 +66,13 @@ class TimelineRepository:
         rispedito dopo un timeout di rete non duplica righe già presenti."""
         if not entries:
             return 0
-        rows = [(e.session_id, e.ts, e.source, e.event_type, e.payload) for e in entries]
+        rows = [
+            (e.session_id, e.ts, e.source, e.event_type, e.payload, e.description) for e in entries
+        ]
         with self._lock, self._connect() as conn:
             cur = conn.executemany(
                 "INSERT OR IGNORE INTO timeline "
-                "(session_id, ts, source, event_type, payload) VALUES (?, ?, ?, ?, ?)",
+                "(session_id, ts, source, event_type, payload, description) VALUES (?, ?, ?, ?, ?, ?)",
                 rows,
             )
             return cur.rowcount

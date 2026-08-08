@@ -18,7 +18,11 @@ def create_event_routes(timeline_service: TimelineService) -> Blueprint:
             return error_response("MISSING_EVENT_TYPE", "event_type è obbligatorio", 400)
 
         payload = data.get("payload", {})
-        session_id = timeline_service.record_moodle_event(event_type, payload)
+        description = data.get("description")  
+        ts_ms = data.get("ts_ms")               # None -> usa l'arrivo al backend
+        session_id = timeline_service.record_moodle_event(
+            event_type, payload, description=description, ts_ms=ts_ms
+        )
 
         return jsonify({"recorded": True, "session_id": session_id})
 

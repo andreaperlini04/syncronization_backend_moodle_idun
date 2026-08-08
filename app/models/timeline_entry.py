@@ -9,3 +9,4 @@ class TimelineEntry:
     source: str                # "moodle" | "eeg"
     event_type: str
     payload: str                # JSON già serializzato
+    description: str = ""       # leggibile per revisione umana (vedi moodle_descriptions.py)
