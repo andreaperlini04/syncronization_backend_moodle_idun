@@ -27,6 +27,152 @@ class TimelineService:
         self._session_service = session_service
         self._clock_skew_repo = clock_skew_repository
 
+    # ------------------------------------------------------------------ #
+    #  Ingestione unificata (contratto client -> backend)                 #
+    # ------------------------------------------------------------------ #
+
+    def ingest(self, events: list) -> dict:
+        """Registra un array di eventi nell'envelope comune alle due sorgenti:
+
+            {"session_id", "timestamp", "source", "event_type", "payload"}
+
+        Un evento malformato viene contato e saltato, non fa fallire l'intera
+        richiesta: il client non ha retry automatico, quindi un 400 su una riga
+        sola costerebbe l'intera sessione (300-800 campioni).
+
+        L'inserimento è idempotente sulla chiave (session_id, source,
+        event_type, ts) del vincolo UNIQUE: un reinvio manuale della stessa
+        sessione non duplica nulla.
+
+        Returns:
+            dict: riepilogo (ricevuti, inseriti, duplicati, sessioni toccate).
+        """
+        entries: list[TimelineEntry] = []
+        invalid = 0
+        skew_samples = 0
+        opened: list[str] = []
+        superseded: list[str] = []
+        closed: list[str] = []
+        registered: list[str] = []
+
+        for raw in events:
+            if not isinstance(raw, dict):
+                invalid += 1
+                continue
+
+            source = raw.get("source")
+            event_type = raw.get("event_type")
+            if not source or not event_type:
+                invalid += 1
+                continue
+
+            ts = self._coerce_ts(raw.get("timestamp"))
+            payload = raw.get("payload")
+            if not isinstance(payload, dict):
+                # Payload non-oggetto: conservato comunque, incapsulato, così
+                # il dato non va perso e la colonna resta sempre un JSON object.
+                payload = {} if payload is None else {"value": payload}
+            session_id = raw.get("session_id") or None
+            description = raw.get("description")
+
+            if event_type == "session_start":
+                if not session_id:
+                    # Senza id la sessione non è correlabile con Moodle:
+                    # è il solo caso in cui l'evento è inutilizzabile.
+                    invalid += 1
+                    continue
+                _, sup = self._session_service.open_session(session_id, ts)
+                opened.append(session_id)
+                if sup:
+                    superseded.append(sup)
+
+            elif event_type == "session_end":
+                # Non previsto dal contratto attuale (lo Stop si deduce
+                # dall'arrivo del batch), ma gestito: se il client lo aggiunge
+                # non serve toccare il backend.
+                if session_id:
+                    self._session_service.close_session(session_id, ts)
+                    closed.append(session_id)
+
+            elif event_type == "clock_skew_measured":
+                # Telemetria sulla misura, non comportamento: tabella separata.
+                self._clock_skew_repo.insert(
+                    session_id=session_id or self._session_service.current_session_id(),
+                    ts=ts,
+                    skew_ms=payload.get("skew_ms", 0),
+                    uncertainty_ms=payload.get("uncertainty_ms", 0),
+                    rtt_min_ms=payload.get("rtt_min_ms", 0),
+                    samples=payload.get("samples", 0),
+                    payload=json.dumps(payload),
+                )
+                skew_samples += 1
+                continue
+
+            if source == "eeg":
+                if not session_id:
+                    invalid += 1
+                    continue
+                # Se la POST di session_start è fallita il client registra
+                # comunque in locale: la sessione arriva qui solo allo Stop,
+                # e va accettata invece che rifiutata con 404.
+                if self._session_service.ensure_registered(session_id, ts):
+                    registered.append(session_id)
+            else:
+                # Il plugin Moodle non conosce il session_id: glielo assegna il
+                # backend, prendendo quello della sessione EEG attiva. Se non ce
+                # n'è nessuna la riga resta con session_id NULL invece di essere
+                # scartata: l'evento è comunque riallineabile per timestamp.
+                session_id = session_id or self._session_service.current_session_id()
+                if description is None:
+                    description = describe(event_type, payload)
+
+            entries.append(
+                TimelineEntry(
+                    session_id=session_id,
+                    ts=ts,
+                    source=source,
+                    event_type=event_type,
+                    payload=json.dumps(payload),
+                    description=description or "",
+                )
+            )
+
+        inserted = self._timeline_repo.insert_many(entries)
+
+        # row_count aggiornato dopo l'inserimento: un session_end può arrivare
+        # nella stessa richiesta dei campioni che deve contare.
+        for session_id in closed:
+            self._session_service.update_row_count(
+                session_id, self._timeline_repo.count_for_session(session_id)
+            )
+
+        return {
+            "received": len(events),
+            "stored": inserted,
+            "duplicates": len(entries) - inserted,
+            "invalid": invalid,
+            "clock_skew_samples": skew_samples,
+            "sessions_opened": opened,
+            "sessions_superseded": superseded,
+            "sessions_closed": closed,
+            "sessions_autoregistered": registered,
+        }
+
+    @staticmethod
+    def _coerce_ts(value) -> float:
+        """Timestamp del contratto: epoch in secondi, float.
+
+        Tollera i millisecondi (il plugin Moodle lavora in ms): un epoch in
+        secondi supera 1e11 solo nell'anno 5138, quindi la soglia discrimina
+        senza ambiguità. Valore assente o non numerico -> istante di arrivo.
+        """
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return time.time()
+        value = float(value)
+        if value <= 0:
+            return time.time()
+        return value / 1000 if value > 1e11 else value
+
     def record_moodle_event(
         self,
         event_type: str,

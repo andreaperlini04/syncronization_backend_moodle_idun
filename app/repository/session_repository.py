@@ -34,6 +34,41 @@ class SessionRepository:
                 """
             )
 
+    def save_open(self, session: Session) -> bool:
+        """Registra una sessione appena aperta (stopped_at ancora NULL).
+
+        INSERT OR IGNORE: un session_start rispedito a mano, o una sessione
+        già chiusa i cui campioni arrivano in ritardo, non devono azzerare
+        stopped_at/row_count già scritti.
+
+        Returns:
+            bool: True se la riga è stata creata ora.
+        """
+        with self._lock, self._connect() as conn:
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO sessions (session_id, started_at) VALUES (?, ?)",
+                (session.session_id, session.started_at),
+            )
+            return cur.rowcount > 0
+
+    def mark_stopped(self, session_id: str, stopped_at: float, row_count: int | None = None) -> None:
+        """Chiude una sessione già presente. row_count None lascia invariato
+        il valore esistente (COALESCE), così una chiusura per supersede non
+        cancella un conteggio scritto da uno stop precedente."""
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                "UPDATE sessions SET stopped_at = ?, row_count = COALESCE(?, row_count) "
+                "WHERE session_id = ?",
+                (stopped_at, row_count, session_id),
+            )
+
+    def set_row_count(self, session_id: str, row_count: int) -> None:
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                "UPDATE sessions SET row_count = ? WHERE session_id = ?",
+                (row_count, session_id),
+            )
+
     def save_closed(self, session: Session) -> None:
         with self._lock, self._connect() as conn:
             conn.execute(

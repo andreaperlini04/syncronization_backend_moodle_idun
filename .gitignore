@@ -25,3 +25,6 @@ sessions/
 
 # Log
 *.log
+
+
+.claude
