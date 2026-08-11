@@ -1,11 +1,9 @@
 # syncronization_backend_moodle_idun
 
 Backend di raccolta per il progetto C11326: riceve gli eventi del client EEG
-(`EEGVisualizer.py`, IDUN Guardian 4) e del plugin Moodle `local_eegimucapture`,
+(`EEGVisualizer.py`, IDUN Guardian 3) e del plugin Moodle `local_eegimucapture`,
 li persiste su SQLite e li tiene disponibili per l'analisi.
 
-L'allineamento fra le due sorgenti avviene **per timestamp**: il backend non
-produce righe fuse EEG+Moodle, conserva solo evento, timestamp e `session_id`.
 
 ## Avvio
 
