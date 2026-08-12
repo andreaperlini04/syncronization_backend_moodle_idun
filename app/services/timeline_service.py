@@ -1,17 +1,10 @@
 import json
-import time
 
 from app.models.timeline_entry import TimelineEntry
 from app.repository.clock_skew_repository import ClockSkewRepository
 from app.repository.timeline_repository import TimelineRepository
 from app.services.moodle_descriptions import describe
 from app.services.session_service import SessionService
-
-
-class UnknownSessionError(Exception):
-    def __init__(self, session_id: str):
-        self.session_id = session_id
-        super().__init__(f"session_id sconosciuto: {session_id}")
 
 
 class TimelineService:
@@ -40,6 +33,9 @@ class TimelineService:
         richiesta: il client non ha retry automatico, quindi un 400 su una riga
         sola costerebbe l'intera sessione (300-800 campioni).
 
+        'timestamp' è obbligatorio e non ha ripiego: senza, l'evento è
+        scartato e contato in 'no_timestamp'. Il perché è in _coerce_ts.
+
         L'inserimento è idempotente sulla chiave (session_id, source,
         event_type, ts) del vincolo UNIQUE: un reinvio manuale della stessa
         sessione non duplica nulla.
@@ -49,6 +45,7 @@ class TimelineService:
         """
         entries: list[TimelineEntry] = []
         invalid = 0
+        no_timestamp = 0
         skew_samples = 0
         opened: list[str] = []
         superseded: list[str] = []
@@ -67,6 +64,15 @@ class TimelineService:
                 continue
 
             ts = self._coerce_ts(raw.get("timestamp"))
+            if ts is None:
+                # Contatore separato da 'invalid': un batch che perde righe
+                # per timestamp mancante è quasi sempre una regressione nella
+                # serializzazione del client (null, stringa, 0), non un
+                # evento malformato isolato. Distinguerlo lo rende
+                # diagnosticabile dalla sola risposta.
+                no_timestamp += 1
+                continue
+
             payload = raw.get("payload")
             if not isinstance(payload, dict):
                 # Payload non-oggetto: conservato comunque, incapsulato, così
@@ -151,6 +157,7 @@ class TimelineService:
             "stored": inserted,
             "duplicates": len(entries) - inserted,
             "invalid": invalid,
+            "no_timestamp": no_timestamp,
             "clock_skew_samples": skew_samples,
             "sessions_opened": opened,
             "sessions_superseded": superseded,
@@ -159,87 +166,27 @@ class TimelineService:
         }
 
     @staticmethod
-    def _coerce_ts(value) -> float:
+    def _coerce_ts(value) -> float | None:
         """Timestamp del contratto: epoch in secondi, float.
 
-        Tollera i millisecondi (il plugin Moodle lavora in ms): un epoch in
-        secondi supera 1e11 solo nell'anno 5138, quindi la soglia discrimina
-        senza ambiguità. Valore assente o non numerico -> istante di arrivo.
+        Tollera i millisecondi (il plugin Moodle lavora in ms interi, 13
+        cifre): un epoch in secondi supera 1e11 solo nell'anno 5138, mentre
+        1e11 ms è il 1973, quindi la soglia discrimina senza ambiguità.
+
+        Nessun ripiego sull'ora di arrivo al backend, ed è deliberato: il
+        ritardo di rete e di accodamento è ignoto e variabile, quindi un
+        timestamp inventato posizionerebbe l'evento nel punto sbagliato
+        della timeline. Dato che l'intero scopo del sistema è correlare EEG
+        e attività Moodle nel tempo, un evento mal posizionato è peggio di
+        un evento mancante: il primo falsifica l'analisi in silenzio, il
+        secondo si conta in 'no_timestamp'.
+
+        Returns:
+            float | None: None se il valore è assente, non numerico o <= 0.
         """
         if isinstance(value, bool) or not isinstance(value, (int, float)):
-            return time.time()
+            return None
         value = float(value)
         if value <= 0:
-            return time.time()
+            return None
         return value / 1000 if value > 1e11 else value
-
-    def record_moodle_event(
-        self,
-        event_type: str,
-        payload: dict,
-        description: str | None = None,
-        ts_ms: float | None = None,
-    ) -> str | None:
-        """Registra un evento dal plugin Moodle. session_id assegnato in
-        automatico dalla sessione attiva corrente (None se nessuna attiva).
-
-        description/ts_ms: usati dagli eventi relayati dal server Moodle
-        (già passati per event_writer::write() lato PHP, con description
-        già calcolata e timestamp originale corretto per lo skew). Se
-        assenti (eventi client "in diretta"), si comporta come prima:
-        description calcolata qui, ts = arrivo al backend.
-
-        clock_skew_measured non finisce in timeline: è telemetria
-        diagnostica sulla misura stessa, non comportamento dello studente."""
-        session_id = self._session_service.current_session_id()
-        ts = ts_ms / 1000 if ts_ms is not None else time.time()
-
-        if event_type == "clock_skew_measured":
-            self._clock_skew_repo.insert(
-                session_id=session_id,
-                ts=ts,
-                skew_ms=payload.get("skew_ms", 0),
-                uncertainty_ms=payload.get("uncertainty_ms", 0),
-                rtt_min_ms=payload.get("rtt_min_ms", 0),
-                samples=payload.get("samples", 0),
-                payload=json.dumps(payload),
-            )
-            return session_id
-
-        entry = TimelineEntry(
-            session_id=session_id,
-            ts=ts,
-            source="moodle",
-            event_type=event_type,
-            payload=json.dumps(payload),
-            description=description if description is not None else describe(event_type, payload),
-        )
-        self._timeline_repo.insert_event(entry)
-        return session_id
-
-    def record_eeg_rows(self, session_id: str, rows: list[dict]) -> int:
-        """Registra un chunk (o batch) di band power dall'app IDUN.
-        session_id deve essere noto (attivo o già chiuso), altrimenti errore."""
-        if not self._session_service.is_known_session(session_id):
-            raise UnknownSessionError(session_id)
-
-        arrival_ts = time.time()
-        entries = [
-            TimelineEntry(
-                session_id=session_id,
-                # Se la riga non porta un ts proprio, si usa l'arrivo del
-                # chunk con un piccolo offset per indice: senza offset, righe
-                # multiple nello stesso chunk senza ts esplicito avrebbero
-                # tutte lo stesso valore e il vincolo UNIQUE ne scarterebbe
-                # la maggior parte come falsi duplicati.
-                ts=row.get("ts", arrival_ts + i * 1e-6),
-                source="eeg",
-                event_type=row.get("event_type", "band_power"),
-                payload=json.dumps(row.get("payload", {})),
-            )
-            for i, row in enumerate(rows)
-        ]
-        return self._timeline_repo.insert_many(entries)
-
-    def count_for_session(self, session_id: str) -> int:
-        return self._timeline_repo.count_for_session(session_id)

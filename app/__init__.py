@@ -1,10 +1,7 @@
 from flask import Flask
 
 from app.api.cors import register_cors
-from app.api.eeg_routes import create_eeg_routes
-from app.api.event_routes import create_event_routes
 from app.api.ingest_routes import create_ingest_routes
-from app.api.session_routes import create_session_routes
 from app.config import Config
 from app.repository.clock_skew_repository import ClockSkewRepository
 from app.repository.session_repository import SessionRepository
@@ -32,14 +29,8 @@ def create_app(config_class=Config) -> Flask:
     timeline_service = TimelineService(timeline_repository, session_service, clock_skew_repository)
 
     # API (blueprint)
-    # /api/sessions e' l'endpoint del contratto: envelope comune alle due
-    # sorgenti. Gli altri restano registrati per non rompere il plugin Moodle
-    # nella sua forma attuale.
+    # Un solo endpoint, /api/v1/events: envelope comune al client EEG e al
+    # plugin Moodle, discriminate sui campi source / event_type.
     app.register_blueprint(create_ingest_routes(timeline_service))
-    app.register_blueprint(
-        create_session_routes(session_service, session_repository, timeline_service)
-    )
-    app.register_blueprint(create_event_routes(timeline_service))
-    app.register_blueprint(create_eeg_routes(timeline_service))
 
     return app

@@ -51,16 +51,6 @@ class TimelineRepository:
                 "CREATE INDEX IF NOT EXISTS idx_timeline_session ON timeline(session_id, ts)"
             )
 
-    def insert_event(self, entry: TimelineEntry) -> int:
-        """Inserisce una singola riga. Ritorna 1 se inserita, 0 se scartata (duplicato)."""
-        with self._lock, self._connect() as conn:
-            cur = conn.execute(
-                "INSERT OR IGNORE INTO timeline "
-                "(session_id, ts, source, event_type, payload, description) VALUES (?, ?, ?, ?, ?, ?)",
-                (entry.session_id, entry.ts, entry.source, entry.event_type, entry.payload, entry.description),
-            )
-            return cur.rowcount
-
     def insert_many(self, entries: list[TimelineEntry]) -> int:
         """Inserimento bulk (usato per i chunk EEG). Idempotente: un chunk
         rispedito dopo un timeout di rete non duplica righe già presenti."""

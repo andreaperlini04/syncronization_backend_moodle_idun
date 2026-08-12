@@ -69,14 +69,6 @@ class SessionRepository:
                 (row_count, session_id),
             )
 
-    def save_closed(self, session: Session) -> None:
-        with self._lock, self._connect() as conn:
-            conn.execute(
-                "INSERT OR REPLACE INTO sessions "
-                "(session_id, started_at, stopped_at, row_count) VALUES (?, ?, ?, ?)",
-                (session.session_id, session.started_at, session.stopped_at, session.row_count),
-            )
-
     def exists(self, session_id: str) -> bool:
         with self._connect() as conn:
             row = conn.execute(

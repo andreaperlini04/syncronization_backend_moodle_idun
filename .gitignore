@@ -23,6 +23,7 @@ sessions/
 .idea/
 .DS_Store
 
+requirements.txt
 # Log
 *.log
 
