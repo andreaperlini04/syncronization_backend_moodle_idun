@@ -2,10 +2,10 @@ import sqlite3
 
 conn = sqlite3.connect("sessions/timeline.db")
 query = """
-    SELECT *
+    SELECT description
     FROM timeline
-    ORDER BY id DESC
-    LIMIT 10
+    ORDER BY ts DESC
+    LIMIT 30
 """
 for row in conn.execute(query):
     print(row)

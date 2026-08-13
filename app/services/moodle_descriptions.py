@@ -64,8 +64,12 @@ def _answer_selected(p: dict) -> str:
 
 
 def _answer_changed(p: dict) -> str:
+    # Controlla se 'sub_question' esiste nel payload
+    sub_q = p.get("sub_question")
+    sub_q_text = f" (sub-question: '{sub_q}')" if sub_q else ""
+    
     return (
-        f"User changed answer for question {_f(p, 'question_number')} "
+        f"User changed answer for question {_f(p, 'question_number')}{sub_q_text} "
         f'from "{_f(p, "old_answer_text")}" to "{_f(p, "new_answer_text")}"'
     )
 
