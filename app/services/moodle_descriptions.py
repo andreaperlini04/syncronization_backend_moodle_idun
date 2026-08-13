@@ -2,11 +2,8 @@
 
 Il backend è l'unica autorità sulle description: il plugin manda sempre
 `description: null`, sia per gli eventi client-side (JS) sia per quelli
-server-side relayati. Prima esistevano due implementazioni indipendenti
-della stessa tabella — questa e event_writer.php::descriptions() — e i
-loro testi erano già divergenti su due template (vedi sotto). Ora PHP
-calcola la description solo per i suoi file di log locali (.jsonl/.log),
-che non transitano da qui.
+server-side relayati. PHP calcola una description solo per i propri file
+di log locali (.jsonl/.log), che non transitano da qui.
 
 Tradotta da event_writer.php::descriptions() (plugin local_eegimucapture).
 Se PHP aggiunge un event_type, va aggiunta una voce anche qui: non c'è
@@ -22,11 +19,8 @@ Due template si discostano volutamente dal testo PHP:
                        activity_opened e course_opened — tre event_type
                        distinti indistinguibili a occhio nella timeline.
                        Qui resta "User loaded page", che li separa.
-  clock_skew_measured   testo storico di questo file.
-
-Entrambi sono eventi client-side, quindi le righe già in database sono
-state scritte da questo file: mantenere il testo di qui evita di spezzare
-in due la stessa description a metà del dataset.
+  clock_skew_measured   testo scelto per coerenza con gli altri messaggi
+                       diagnostici di questo modulo.
 """
 
 from typing import Callable

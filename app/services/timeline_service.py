@@ -93,9 +93,9 @@ class TimelineService:
                     superseded.append(sup)
 
             elif event_type == "session_end":
-                # Non previsto dal contratto attuale (lo Stop si deduce
-                # dall'arrivo del batch), ma gestito: se il client lo aggiunge
-                # non serve toccare il backend.
+                # Lo Stop si deduce di norma dall'arrivo del batch finale;
+                # se il client invia esplicitamente session_end, l'evento
+                # chiude comunque la sessione indicata.
                 if session_id:
                     self._session_service.close_session(session_id, ts)
                     closed.append(session_id)
@@ -123,7 +123,7 @@ class TimelineService:
                 # e va accettata invece che rifiutata con 404.
                 if self._session_service.ensure_registered(session_id, ts):
                     registered.append(session_id)
-            else:
+            elif source == "moodle":
                 # Il plugin Moodle non conosce il session_id: glielo assegna il
                 # backend, prendendo quello della sessione EEG attiva. Se non ce
                 # n'è nessuna la riga resta con session_id NULL invece di essere
@@ -131,6 +131,12 @@ class TimelineService:
                 session_id = session_id or self._session_service.current_session_id()
                 if description is None:
                     description = describe(event_type, payload)
+            else:
+                # source valorizzato ma diverso da "eeg"/"moodle": nessuno
+                # dei due schemi di attribuzione si applica. Scartato invece
+                # di essere instradato come Moodle per esclusione.
+                invalid += 1
+                continue
 
             entries.append(
                 TimelineEntry(
