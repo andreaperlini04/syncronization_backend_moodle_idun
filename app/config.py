@@ -17,4 +17,12 @@ class Config:
     ]
 
 
-# TestConfig (DB_PATH in memoria/temporaneo, ecc.) verrà aggiunta insieme ai test.
+class TestConfig(Config):
+    """Configurazione per i test. DB_PATH non è fissato qui: ogni repository
+    apre una connessione sqlite3 per operazione, quindi con ':memory:' ogni
+    connessione vedrebbe un database vuoto diverso e init_schema() non
+    servirebbe a nulla. La fixture 'app' in tests/conftest.py assegna un
+    file temporaneo per test (pytest tmp_path), isolato e ripulito da solo."""
+
+    DEBUG = True
+    TESTING = True

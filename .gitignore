@@ -29,3 +29,4 @@ requirements.txt
 
 
 .claude
+.coverage
