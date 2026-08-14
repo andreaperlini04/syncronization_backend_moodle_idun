@@ -77,18 +77,23 @@ comunque accettato.
 
 | Campo | Obbligatorio | Note |
 |---|---|---|
-| `source` | sì | `"eeg"` oppure `"moodle"` |
+| `source` | sì | `"eeg"` oppure `"moodle"`; qualunque altro valore rende l'evento non valido |
 | `event_type` | sì | vedi *Tipi di evento* |
 | `timestamp` | sì | epoch in secondi o millisecondi (vedi sotto) |
 | `session_id` | dipende | obbligatorio per `source: "eeg"`; assente per gli eventi Moodle, che lo ricevono dal backend |
 | `payload` | no | oggetto JSON; un valore non-oggetto viene incapsulato in `{"value": ...}` |
 | `description` | no | se assente o `null`, la calcola il backend (vedi *Descrizioni*) |
 
-Un evento privo di `source` o di `event_type` viene contato come non valido e
-saltato, senza far fallire la richiesta. Questa tolleranza è necessaria perché
-il client EEG non dispone di un meccanismo di ritrasmissione automatica: un
-errore su una singola riga farebbe perdere l'intera sessione, che contiene
-tipicamente da 300 a 800 campioni.
+Un evento privo di `source` o di `event_type`, o con un `source` diverso dai
+due previsti, viene contato come non valido e saltato, senza far fallire la
+richiesta. Questa tolleranza è necessaria perché il client EEG non dispone di
+un meccanismo di ritrasmissione automatica: un errore su una singola riga
+farebbe perdere l'intera sessione, che contiene tipicamente da 300 a 800
+campioni.
+
+Un `source` non riconosciuto viene scartato invece di essere trattato come
+Moodle per esclusione: erediterebbe l'identificatore della sessione EEG attiva
+e una descrizione calcolata, entrando nella timeline come un evento legittimo.
 
 ### Risposta
 
@@ -159,7 +164,7 @@ emessi entro un secondo:
 | PHP `microtime(true)` | ~1 µs | 5 su 5 |
 
 La risoluzione minima richiesta è quindi il millisecondo. Per riferimento, il
-dispositivo IDUN campiona a 250 Hz, ossia un campione ogni 4 ms.
+dispositivo IDUN campiona a 250 Hz circa, ossia un campione ogni ~4 ms.
 
 
 ## Tipi di evento
@@ -262,6 +267,68 @@ Vincolo `UNIQUE(session_id, source, event_type, ts)`; indice su
 
 **`clock_skew`** — misure diagnostiche dello scostamento fra orologi:
 `session_id`, `ts`, `skew_ms`, `uncertainty_ms`, `rtt_min_ms`, `samples`.
+
+
+## Test
+
+Dipendenze, da installare una volta nell'ambiente virtuale:
+
+```
+venv\Scripts\Activate.ps1
+pip install pytest pytest-cov
+```
+
+Esecuzione dell'intera suite:
+
+```
+python -m pytest tests/
+```
+
+Con la copertura del codice, e l'elenco delle righe che nessun test esegue:
+
+```
+python -m pytest tests/ --cov=app --cov-report=term-missing
+```
+
+Ogni test riceve un database su file temporaneo, creato e rimosso da pytest:
+l'esecuzione non tocca `sessions/timeline.db` e non altera i dati raccolti.
+
+Varianti utili:
+
+| Comando | Effetto |
+|---|---|
+| `python -m pytest tests/ -v` | un test per riga, con esito singolo |
+| `python -m pytest tests/ -x` | si ferma al primo fallimento |
+| `python -m pytest tests/test_ingest_contract.py` | un solo file |
+| `python -m pytest tests/ -k timestamp` | solo i test il cui nome contiene "timestamp" |
+
+Una copertura alta non garantisce che i test siano significativi: indica quali
+righe vengono eseguite, non se il loro effetto viene verificato. Le righe
+scoperte residue riguardano gli header CORS, il corpo della richiesta non
+interpretabile come JSON e alcuni rami difensivi che il contratto attuale non
+produce.
+
+### Composizione della suite
+
+| File | Tipo | Oggetto |
+|---|---|---|
+| `tests/test_ingest_contract.py` | integrazione | `POST /api/v1/events` attraverso tutti i livelli: route, servizio, repository, SQLite. Nessun mock |
+| `tests/test_session_service.py` | unità | `SessionService` isolato: apertura, sostituzione e chiusura della sessione, autoregistrazione |
+| `tests/test_moodle_descriptions.py` | unità | i modelli di descrizione, funzioni pure senza app né database |
+
+Le fixture condivise sono in `tests/conftest.py`. La suite non comprende test
+end-to-end: verificarli richiederebbe il backend in esecuzione come processo
+separato, con il client EEG e il plugin reali.
+
+### Verificare che un test sia significativo
+
+Un test verde può non controllare nulla. Per accertarsene, si introduce
+deliberatamente un guasto e si verifica che la suite lo rilevi. Esempio su
+`_coerce_ts` in `app/services/timeline_service.py`: sostituire i due
+`return None` con `return time.time()`, ripristinando il ripiego sull'istante
+di arrivo. L'esecuzione deve segnalare il fallimento dei sei casi di
+`test_event_without_valid_timestamp_is_rejected`. Ripristinato il codice, la
+suite torna verde.
 
 
 ## Ispezione del database

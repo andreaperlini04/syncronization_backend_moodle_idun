@@ -1,28 +1,4 @@
-"""Genera description leggibili per gli eventi Moodle nella timeline.
-
-Il backend è l'unica autorità sulle description: il plugin manda sempre
-`description: null`, sia per gli eventi client-side (JS) sia per quelli
-server-side relayati. PHP calcola una description solo per i propri file
-di log locali (.jsonl/.log), che non transitano da qui.
-
-Tradotta da event_writer.php::descriptions() (plugin local_eegimucapture).
-Se PHP aggiunge un event_type, va aggiunta una voce anche qui: non c'è
-codice condiviso fra i due linguaggi.
-
-event_type senza voce nel registry degradano allo slug grezzo (stesso
-comportamento del fallback PHP), non bloccano mai la scrittura.
-
-Due template si discostano volutamente dal testo PHP:
-
-  page_loaded          PHP dice 'User opened "X"', che produrrebbe una
-                       description quasi identica a quella di
-                       activity_opened e course_opened — tre event_type
-                       distinti indistinguibili a occhio nella timeline.
-                       Qui resta "User loaded page", che li separa.
-  clock_skew_measured   testo scelto per coerenza con gli altri messaggi
-                       diagnostici di questo modulo.
-"""
-
+# Genera description leggibili per gli eventi Moodle nella timeline.
 from typing import Callable
 
 _Template = Callable[[dict], str]
@@ -113,7 +89,7 @@ def _input_change(p: dict) -> str:
 
 def _activity_opened(p: dict) -> str:
     module_type = p.get("module_type") or "activity"
-    name = p.get("activity_name") or f"#{_f(p, 'cmid')}"
+    name = p.get("activity_name") or f"#{_f(p, 'course_module_id')}"
     return f'User opened {module_type} "{name}"'
 
 
