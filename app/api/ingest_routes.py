@@ -22,7 +22,7 @@ def create_ingest_routes(timeline_service: TimelineService) -> Blueprint:
 
     @bp.route("/api/v1/events", methods=["POST"])
     def ingest_events():
-        events = request.get_json(silent=True)
+        events = request.get_json(silent=True, force=True)
         if events is None:
             return error_response("INVALID_BODY", "Body JSON mancante o non valido", 400)
 
