@@ -31,6 +31,7 @@ class TimelineRepository:
                     event_type  TEXT    NOT NULL,
                     payload     TEXT    NOT NULL,
                     description TEXT    NOT NULL DEFAULT '',
+                    user_id INTEGER,
                     UNIQUE(session_id, source, event_type, ts)
                 )
                 """
@@ -41,6 +42,11 @@ class TimelineRepository:
             # ignora l'errore se la colonna c'è già.
             try:
                 conn.execute("ALTER TABLE timeline ADD COLUMN description TEXT NOT NULL DEFAULT ''")
+            except sqlite3.OperationalError:
+                pass
+            
+            try:
+                conn.execute("ALTER TABLE timeline ADD COLUMN user_id INTEGER")
             except sqlite3.OperationalError:
                 pass
 
@@ -56,13 +62,17 @@ class TimelineRepository:
         rispedito dopo un timeout di rete non duplica righe già presenti."""
         if not entries:
             return 0
+        # L'ordine della tupla segue quello dell'elenco di colonne della
+        # INSERT, non quello dei campi della dataclass.
         rows = [
-            (e.session_id, e.ts, e.source, e.event_type, e.payload, e.description) for e in entries
+            (e.session_id, e.ts, e.source, e.event_type, e.user_id, e.payload, e.description)
+            for e in entries
         ]
         with self._lock, self._connect() as conn:
             cur = conn.executemany(
                 "INSERT OR IGNORE INTO timeline "
-                "(session_id, ts, source, event_type, payload, description) VALUES (?, ?, ?, ?, ?, ?)",
+                "(session_id, ts, source, event_type, user_id, payload, description) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
                 rows,
             )
             return cur.rowcount

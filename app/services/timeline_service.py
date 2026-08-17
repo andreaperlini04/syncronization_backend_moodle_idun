@@ -80,6 +80,9 @@ class TimelineService:
                 payload = {} if payload is None else {"value": payload}
             session_id = raw.get("session_id") or None
             description = raw.get("description")
+            user_id = raw.get("user_id")
+            if user_id is None and isinstance(payload.get("context"), dict):
+                user_id = payload["context"].get("user_id")
 
             if event_type == "session_start":
                 if not session_id:
@@ -146,6 +149,7 @@ class TimelineService:
                     event_type=event_type,
                     payload=json.dumps(payload),
                     description=description or "",
+                    user_id=user_id, 
                 )
             )
 

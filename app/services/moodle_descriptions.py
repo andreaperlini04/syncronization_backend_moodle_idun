@@ -32,6 +32,8 @@ def _named(name_key: str, id_key: str, template: str) -> _Template:
 # ── interazioni domanda ───────────────────────────────────────────────
 
 def _question_displayed(p: dict) -> str:
+    if p.get("qtype") == "description":
+        return "User displayed information screen"
     return f"User displayed Question {_f(p, 'question_number')}"
 
 
