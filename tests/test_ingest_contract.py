@@ -20,14 +20,20 @@ def post(client, events):
 
 
 def timeline_rows(db_conn):
+    # user_id resta in coda: gli indici usati altrove non si spostano.
     return db_conn.execute(
-        "SELECT session_id, ts, source, event_type, description, payload "
+        "SELECT session_id, ts, source, event_type, description, payload, user_id "
         "FROM timeline ORDER BY id"
     ).fetchall()
 
 
 def rows_by_source(db_conn):
     return {row[2]: row for row in timeline_rows(db_conn)}
+
+
+def stored_user_id(db_conn):
+    """user_id dell'unica riga in timeline."""
+    return timeline_rows(db_conn)[0][6]
 
 
 # --------------------------------------------------------------------- #
@@ -400,3 +406,81 @@ def test_empty_string_description_is_not_recomputed(client, db_conn):
     ])
 
     assert timeline_rows(db_conn)[0][4] == ""
+
+
+# --------------------------------------------------------------------- #
+#  user_id                                                              #
+# --------------------------------------------------------------------- #
+
+def test_user_id_is_read_from_payload_context(client, db_conn):
+    """Il caso reale: il plugin non manda user_id come campo proprio, lo
+    include nell'oggetto context insieme al resto dell'ambiente."""
+    post(client, [
+        {"timestamp": 1786544600.0, "source": "moodle",
+         "event_type": "page_loaded",
+         "payload": {"context": {"user_id": 7, "course_name": "Neuroscienze"}}},
+    ])
+
+    assert stored_user_id(db_conn) == 7
+
+
+def test_top_level_user_id_takes_precedence_over_context(client, db_conn):
+    post(client, [
+        {"timestamp": 1786544600.0, "source": "moodle", "user_id": 99,
+         "event_type": "page_loaded", "payload": {"context": {"user_id": 7}}},
+    ])
+
+    assert stored_user_id(db_conn) == 99
+
+
+def test_user_id_is_null_when_absent_everywhere(client, db_conn):
+    post(client, [
+        {"timestamp": 1786544600.0, "source": "moodle",
+         "event_type": "navigation_clicked", "payload": {"label": "Avanti"}},
+    ])
+
+    assert stored_user_id(db_conn) is None
+
+
+def test_user_id_survives_a_non_dict_context(client, db_conn):
+    """Un context non-oggetto non deve far fallire l'estrazione: senza il
+    controllo di tipo, .get() su una stringa solleverebbe AttributeError e
+    porterebbe giù l'intero lotto."""
+    post(client, [
+        {"timestamp": 1786544600.0, "source": "moodle",
+         "event_type": "page_loaded", "payload": {"context": "non un oggetto"}},
+    ])
+
+    assert stored_user_id(db_conn) is None
+
+
+def test_eeg_events_carry_no_user_id(client, db_conn):
+    """Il client EEG non conosce l'utente Moodle: la correlazione fra le due
+    sorgenti passa dal session_id, non da questo campo."""
+    post(client, [
+        {"session_id": "s1", "timestamp": 1786544600.0, "source": "eeg",
+         "event_type": "session_start", "payload": {}},
+    ])
+
+    assert stored_user_id(db_conn) is None
+
+
+def test_user_id_is_not_part_of_the_uniqueness_key(client, db_conn):
+    """Due eventi che differiscono solo per user_id collidono comunque: la
+    chiave è (session_id, source, event_type, ts). Conta saperlo prima di
+    usare user_id per distinguere studenti sulla stessa sessione.
+
+    Serve una sessione attiva: con session_id nullo il vincolo non scatta
+    mai e il confronto non direbbe nulla su user_id."""
+    post(client, [{"session_id": "s1", "timestamp": 1786544500.0, "source": "eeg",
+                    "event_type": "session_start", "payload": {}}])
+
+    body = post(client, [
+        {"timestamp": 1786544600.0, "source": "moodle", "user_id": 1,
+         "event_type": "page_loaded", "payload": {}},
+        {"timestamp": 1786544600.0, "source": "moodle", "user_id": 2,
+         "event_type": "page_loaded", "payload": {}},
+    ]).get_json()
+
+    assert body["stored"] == 1
+    assert body["duplicates"] == 1

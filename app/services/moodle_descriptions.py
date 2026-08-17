@@ -99,8 +99,16 @@ def _activity_opened(p: dict) -> str:
 
 def _page_loaded(p: dict) -> str:
     """Testo divergente da PHP per non collidere con activity_opened e
-    course_opened: vedi nota nel docstring del modulo."""
-    ctx = p.get("context") or {}
+    course_opened: vedi nota nel docstring del modulo.
+
+    Unico template che scende in un oggetto annidato, e quindi l'unico dove
+    serve controllare il tipo: su un context non-dizionario, .get()
+    solleverebbe AttributeError e l'eccezione arriverebbe fino alla route,
+    facendo perdere l'intero batch invece del solo evento malformato.
+    """
+    ctx = p.get("context")
+    if not isinstance(ctx, dict):
+        ctx = {}
     activity = ctx.get("activity_name")
     course = ctx.get("course_name")
     if activity:

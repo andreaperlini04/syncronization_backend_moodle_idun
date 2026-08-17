@@ -83,6 +83,7 @@ comunque accettato.
 | `session_id` | dipende | obbligatorio per `source: "eeg"`; assente per gli eventi Moodle, che lo ricevono dal backend |
 | `payload` | no | oggetto JSON; un valore non-oggetto viene incapsulato in `{"value": ...}` |
 | `description` | no | se assente o `null`, la calcola il backend (vedi *Descrizioni*) |
+| `user_id` | no | studente Moodle; se assente viene letto da `payload.context.user_id` (vedi *Identificatore utente*) |
 
 Un evento privo di `source` o di `event_type`, o con un `source` diverso dai
 due previsti, viene contato come non valido e saltato, senza far fallire la
@@ -243,6 +244,34 @@ Le descrizioni sono generate dal backend per tutti gli eventi: il plugin invia
 originati dal server Moodle. Il modulo `app/services/moodle_descriptions.py` è
 l'unica origine dei testi.
 
+## Identificatore utente
+
+Gli eventi Moodle portano nel payload un oggetto `context` con i dati
+dell'ambiente in cui l'evento è avvenuto, fra cui l'identificatore dello
+studente:
+
+```json
+"context": { "user_id": 2, "course_id": 1, "course_name": "Neuroscienze", ... }
+```
+
+Il backend lo promuove a colonna di primo livello della tabella `timeline`,
+così da renderlo interrogabile senza estrarlo dal JSON a ogni query. La regola
+di precedenza è:
+
+1. campo `user_id` al livello superiore del messaggio, se presente;
+2. altrimenti `payload.context.user_id`;
+3. altrimenti `NULL`.
+
+L'estrazione non dipende dal `source`, ma in pratica il campo resta nullo per
+gli eventi EEG, perché il client non conosce l'utente Moodle. La correlazione
+fra le due sorgenti passa quindi dal `session_id`, non da questo campo.
+
+La colonna è stata introdotta su un database già popolato: le righe scritte in
+precedenza hanno `user_id` nullo. `init_schema()` la aggiunge con una
+`ALTER TABLE` racchiusa in un `try/except`, perché SQLite non supporta
+`ADD COLUMN IF NOT EXISTS`.
+
+
 ## Schema del database
 
 File SQLite in `sessions/timeline.db`, in modalità WAL.
@@ -258,6 +287,7 @@ File SQLite in `sessions/timeline.db`, in modalità WAL.
 | `event_type` | TEXT | |
 | `payload` | TEXT | oggetto JSON |
 | `description` | TEXT | vuota per gli eventi EEG |
+| `user_id` | INTEGER | studente Moodle; nullo per gli eventi EEG |
 
 Vincolo `UNIQUE(session_id, source, event_type, ts)`; indice su
 `(session_id, ts)`.
