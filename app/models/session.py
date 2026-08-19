@@ -8,3 +8,4 @@ class Session:
     started_at: float
     stopped_at: Optional[float] = None
     row_count: Optional[int] = None
+    user_id: Optional[int] = None  # studente Moodle, appreso dagli eventi del plugin

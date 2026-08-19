@@ -9,5 +9,5 @@ class TimelineEntry:
     source: str                # "moodle" | "eeg"
     event_type: str
     payload: str                # JSON già serializzato
-    user_id: Optional[int] = None   # studente Moodle; None per source "eeg"
+    user_id: Optional[int] = None   # studente Moodle; sugli eventi EEG arriva dalla sessione
     description: str = ""       # leggibile per revisione umana (vedi moodle_descriptions.py)

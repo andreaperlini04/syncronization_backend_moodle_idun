@@ -29,10 +29,18 @@ class SessionRepository:
                     session_id  TEXT PRIMARY KEY,
                     started_at  REAL NOT NULL,
                     stopped_at  REAL,
-                    row_count   INTEGER
+                    row_count   INTEGER,
+                    user_id     INTEGER
                 )
                 """
             )
+            # Migrazione idempotente sui database già popolati: SQLite non
+            # supporta "ADD COLUMN IF NOT EXISTS", quindi si tenta e si
+            # ignora l'errore se la colonna c'è già.
+            try:
+                conn.execute("ALTER TABLE sessions ADD COLUMN user_id INTEGER")
+            except sqlite3.OperationalError:
+                pass
 
     def save_open(self, session: Session) -> bool:
         """Registra una sessione appena aperta (stopped_at ancora NULL).
@@ -68,6 +76,29 @@ class SessionRepository:
                 "UPDATE sessions SET row_count = ? WHERE session_id = ?",
                 (row_count, session_id),
             )
+
+    def attach_user(self, session_id: str, user_id: int) -> None:
+        """Associa lo studente alla sessione, se non ne ha già uno.
+
+        COALESCE invece di un UPDATE secco: il primo utente osservato vince e
+        resta. Una sessione appartiene a uno studente solo, quindi un secondo
+        user_id sulla stessa sessione è un'anomalia (due browser, due account
+        sulla stessa macchina) e non deve riscrivere l'attribuzione già data
+        alle righe della timeline.
+        """
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                "UPDATE sessions SET user_id = COALESCE(user_id, ?) WHERE session_id = ?",
+                (user_id, session_id),
+            )
+
+    def user_for(self, session_id: str) -> int | None:
+        """Studente della sessione, None se sconosciuto o sessione assente."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT user_id FROM sessions WHERE session_id = ?", (session_id,)
+            ).fetchone()
+            return row[0] if row else None
 
     def exists(self, session_id: str) -> bool:
         with self._connect() as conn:

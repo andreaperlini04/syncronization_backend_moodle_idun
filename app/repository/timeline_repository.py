@@ -77,6 +77,26 @@ class TimelineRepository:
             )
             return cur.rowcount
 
+    def assign_user(self, session_id: str, user_id: int) -> int:
+        """Attribuisce allo studente le righe della sessione rimaste scoperte.
+
+        Serve perché l'utente si impara in corsa: session_start arriva sempre
+        prima del primo evento Moodle, e un batch EEG può precedere del tutto
+        l'attività nel browser. Una UPDATE per sessione, non per riga.
+
+        'user_id IS NULL' come filtro: non tocca mai un valore già scritto,
+        quindi ripeterla è innocuo.
+
+        Returns:
+            int: righe attribuite ora.
+        """
+        with self._lock, self._connect() as conn:
+            cur = conn.execute(
+                "UPDATE timeline SET user_id = ? WHERE session_id = ? AND user_id IS NULL",
+                (user_id, session_id),
+            )
+            return cur.rowcount
+
     def count_for_session(self, session_id: str) -> int:
         with self._connect() as conn:
             row = conn.execute(

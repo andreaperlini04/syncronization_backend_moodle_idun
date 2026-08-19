@@ -40,6 +40,10 @@ class TimelineService:
         event_type, ts) del vincolo UNIQUE: un reinvio manuale della stessa
         sessione non duplica nulla.
 
+        L'attribuzione allo studente è per sessione: l'user_id arriva solo
+        dagli eventi Moodle, e da lì si estende a tutte le righe della stessa
+        sessione, campioni EEG compresi.
+
         Returns:
             dict: riepilogo (ricevuti, inseriti, duplicati, sessioni toccate).
         """
@@ -51,6 +55,7 @@ class TimelineService:
         superseded: list[str] = []
         closed: list[str] = []
         registered: list[str] = []
+        attributable: set[str] = set()
 
         for raw in events:
             if not isinstance(raw, dict):
@@ -141,6 +146,18 @@ class TimelineService:
                 invalid += 1
                 continue
 
+            if session_id:
+                # Attribuzione per sessione. Il client EEG non conosce
+                # l'utente Moodle, ma i due lati condividono il session_id:
+                # l'utente si impara dal plugin e si stampa su tutto il resto
+                # della sessione. Vale anche per un evento Moodle senza
+                # user_id proprio, che è comunque dello stesso studente.
+                if user_id is not None:
+                    self._session_service.attach_user(session_id, user_id)
+                else:
+                    user_id = self._session_service.user_for(session_id)
+                attributable.add(session_id)
+
             entries.append(
                 TimelineEntry(
                     session_id=session_id,
@@ -154,6 +171,18 @@ class TimelineService:
             )
 
         inserted = self._timeline_repo.insert_many(entries)
+
+        # Recupero delle righe scritte prima che l'utente fosse noto. Copre
+        # tre casi che l'attribuzione in corsa non può prendere: session_start,
+        # che precede sempre il primo evento Moodle; i campioni EEG arrivati in
+        # una richiesta anteriore a qualsiasi attività nel browser; e gli
+        # eventi dello stesso lotto costruiti prima dell'evento che porta
+        # l'user_id, dato che le entry si assemblano tutte prima dell'INSERT.
+        attributed = 0
+        for session_id in attributable:
+            user_id = self._session_service.user_for(session_id)
+            if user_id is not None:
+                attributed += self._timeline_repo.assign_user(session_id, user_id)
 
         # row_count aggiornato dopo l'inserimento: un session_end può arrivare
         # nella stessa richiesta dei campioni che deve contare.
@@ -169,6 +198,7 @@ class TimelineService:
             "invalid": invalid,
             "no_timestamp": no_timestamp,
             "clock_skew_samples": skew_samples,
+            "rows_attributed": attributed,
             "sessions_opened": opened,
             "sessions_superseded": superseded,
             "sessions_closed": closed,

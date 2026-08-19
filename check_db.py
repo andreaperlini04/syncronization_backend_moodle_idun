@@ -2,7 +2,7 @@ import sqlite3
 
 conn = sqlite3.connect("sessions/timeline.db")
 query = """
-    SELECT ts, description, user_id
+    SELECT *
     FROM timeline
     ORDER BY  ts DESC
     LIMIT 10

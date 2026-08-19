@@ -83,7 +83,7 @@ comunque accettato.
 | `session_id` | dipende | obbligatorio per `source: "eeg"`; assente per gli eventi Moodle, che lo ricevono dal backend |
 | `payload` | no | oggetto JSON; un valore non-oggetto viene incapsulato in `{"value": ...}` |
 | `description` | no | se assente o `null`, la calcola il backend (vedi *Descrizioni*) |
-| `user_id` | no | studente Moodle; se assente viene letto da `payload.context.user_id` (vedi *Identificatore utente*) |
+| `user_id` | no | studente Moodle; se assente viene letto da `payload.context.user_id`, altrimenti dalla sessione (vedi *Identificatore utente*) |
 
 Un evento privo di `source` o di `event_type`, o con un `source` diverso dai
 due previsti, viene contato come non valido e saltato, senza far fallire la
@@ -102,7 +102,7 @@ Codice `201` con un riepilogo dell'esito:
 
 ```json
 { "received": 5, "stored": 5, "duplicates": 0, "invalid": 0,
-  "no_timestamp": 0, "clock_skew_samples": 0,
+  "no_timestamp": 0, "clock_skew_samples": 0, "rows_attributed": 0,
   "sessions_opened": ["20260812_114414"], "sessions_superseded": [],
   "sessions_closed": [], "sessions_autoregistered": [] }
 ```
@@ -111,6 +111,9 @@ Il riepilogo serve alla verifica manuale e ai test; i client si limitano a
 registrarlo nel proprio log. Due contatori vanno interpretati con attenzione:
 `duplicates` indica righe già presenti, quindi un esito normale in caso di
 ritrasmissione, mentre `no_timestamp` indica **dati perduti**.
+`rows_attributed` conta le righe già scritte a cui questa richiesta ha
+assegnato uno studente (vedi *Identificatore utente*): non sono righe nuove e
+non entrano in `stored`.
 
 La scrittura è sincrona: l'inserimento di 500 campioni richiede circa 20 ms,
 ampiamente entro il timeout di 10 s del client. Non è quindi necessaria una
@@ -260,15 +263,61 @@ di precedenza è:
 
 1. campo `user_id` al livello superiore del messaggio, se presente;
 2. altrimenti `payload.context.user_id`;
-3. altrimenti `NULL`.
+3. altrimenti lo studente già noto della sessione (vedi sotto);
+4. altrimenti `NULL`.
 
-L'estrazione non dipende dal `source`, ma in pratica il campo resta nullo per
-gli eventi EEG, perché il client non conosce l'utente Moodle. La correlazione
-fra le due sorgenti passa quindi dal `session_id`, non da questo campo.
+L'estrazione non dipende dal `source`, ma il client EEG non conosce l'utente
+Moodle e non lo invierà mai: sui suoi eventi il campo arriverebbe sempre nullo.
 
-La colonna è stata introdotta su un database già popolato: le righe scritte in
-precedenza hanno `user_id` nullo. `init_schema()` la aggiunge con una
-`ALTER TABLE` racchiusa in un `try/except`, perché SQLite non supporta
+### Attribuzione per sessione
+
+L'unica cosa che le due sorgenti condividono è il `session_id`. Il backend
+sfrutta questo: impara lo studente dal primo evento Moodle della sessione e lo
+estende a tutte le righe della stessa sessione, campioni EEG compresi.
+
+Lo stato vive in una mappa `session_id -> user_id` in `SessionService`, con la
+colonna `sessions.user_id` come fonte persistente dietro alla cache. La cache
+memorizza anche il risultato negativo: senza, un lotto EEG di una sessione
+priva di utente costerebbe una `SELECT` per campione.
+
+L'utente si impara però *in corsa*, e tre casi restano scoperti
+dall'attribuzione al momento della scrittura:
+
+- `session_start` precede sempre il primo evento Moodle;
+- un lotto EEG può arrivare prima di qualsiasi attività nel browser;
+- dentro un singolo lotto le righe si costruiscono tutte prima dell'`INSERT`,
+  quindi un campione che precede l'evento Moodle non può leggerne l'utente.
+
+Per questo, a fine ingestione, ogni sessione toccata di cui si conosce
+l'utente riceve una `UPDATE` di ripescaggio:
+
+```sql
+UPDATE timeline SET user_id = ? WHERE session_id = ? AND user_id IS NULL
+```
+
+Una sola istruzione per sessione, non per riga. Il filtro `user_id IS NULL`
+non tocca mai un valore già scritto, quindi ripeterla è innocuo. Le righe
+attribuite così sono contate in `rows_attributed` nella risposta.
+
+Il **primo utente osservato vince** e resta, sia in memoria sia sul database
+(`COALESCE(user_id, ?)`). Una sessione appartiene a uno studente solo: un
+secondo `user_id` sulla stessa sessione è un'anomalia — due account sulla
+stessa macchina — e riscrivere l'attribuzione lascerebbe righe EEG assegnate a
+studenti diversi senza modo di dire quale sia quella giusta. L'evento del
+secondo utente conserva comunque il proprio `user_id`, che è un dato osservato
+e non un'inferenza.
+
+Un riavvio del backend perde la mappa in memoria ma non l'attribuzione: i
+campioni di una sessione arrivano allo Stop e possono cadere dopo il riavvio,
+quindi `user_for()` ripiega sulla colonna `sessions.user_id`.
+
+Restano nulli gli eventi di una sessione in cui il plugin non si è mai fatto
+sentire, e quelli registrati fuori sessione (`session_id` nullo): non c'è
+nessuna sessione a cui appenderli.
+
+Entrambe le colonne sono state introdotte su un database già popolato: le
+righe scritte in precedenza hanno `user_id` nullo. `init_schema()` le aggiunge
+con una `ALTER TABLE` racchiusa in un `try/except`, perché SQLite non supporta
 `ADD COLUMN IF NOT EXISTS`.
 
 
@@ -287,13 +336,14 @@ File SQLite in `sessions/timeline.db`, in modalità WAL.
 | `event_type` | TEXT | |
 | `payload` | TEXT | oggetto JSON |
 | `description` | TEXT | vuota per gli eventi EEG |
-| `user_id` | INTEGER | studente Moodle; nullo per gli eventi EEG |
+| `user_id` | INTEGER | studente Moodle; sugli eventi EEG arriva dalla sessione |
 
 Vincolo `UNIQUE(session_id, source, event_type, ts)`; indice su
 `(session_id, ts)`.
 
 **`sessions`** — anagrafica delle sessioni: `session_id`, `started_at`,
-`stopped_at`, `row_count`.
+`stopped_at`, `row_count`, `user_id` (studente della sessione, appreso dagli
+eventi Moodle; fonte autorevole per l'attribuzione delle righe EEG).
 
 **`clock_skew`** — misure diagnostiche dello scostamento fra orologi:
 `session_id`, `ts`, `skew_ms`, `uncertainty_ms`, `rtt_min_ms`, `samples`.

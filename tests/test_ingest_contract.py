@@ -9,6 +9,9 @@ import json
 
 import pytest
 
+from app import create_app
+from app.config import TestConfig
+
 # Sentinella per distinguere "campo assente" da "campo presente con valore
 # null": passano entrambi per _coerce_ts, ma sono due errori diversi lato
 # client e vanno verificati separatamente.
@@ -34,6 +37,34 @@ def rows_by_source(db_conn):
 def stored_user_id(db_conn):
     """user_id dell'unica riga in timeline."""
     return timeline_rows(db_conn)[0][6]
+
+
+def user_ids_of(db_conn, source):
+    """user_id di tutte le righe di una sorgente, in ordine di inserimento."""
+    return [row[6] for row in timeline_rows(db_conn) if row[2] == source]
+
+
+def session_user_id(db_conn, session_id):
+    row = db_conn.execute(
+        "SELECT user_id FROM sessions WHERE session_id = ?", (session_id,)
+    ).fetchone()
+    return row[0] if row else None
+
+
+def start_session(client, session_id="s1", ts=1786544500.0):
+    return post(client, [{"session_id": session_id, "timestamp": ts,
+                          "source": "eeg", "event_type": "session_start", "payload": {}}])
+
+
+def moodle_event(ts, user_id=None, event_type="page_loaded"):
+    """Evento del plugin con l'user_id dove lo mette davvero: dentro context."""
+    payload = {} if user_id is None else {"context": {"user_id": user_id}}
+    return {"timestamp": ts, "source": "moodle", "event_type": event_type, "payload": payload}
+
+
+def eeg_sample(ts, session_id="s1"):
+    return {"session_id": session_id, "timestamp": ts, "source": "eeg",
+            "event_type": "sample", "payload": {"v": 1}}
 
 
 # --------------------------------------------------------------------- #
@@ -454,9 +485,9 @@ def test_user_id_survives_a_non_dict_context(client, db_conn):
     assert stored_user_id(db_conn) is None
 
 
-def test_eeg_events_carry_no_user_id(client, db_conn):
-    """Il client EEG non conosce l'utente Moodle: la correlazione fra le due
-    sorgenti passa dal session_id, non da questo campo."""
+def test_eeg_events_have_no_user_id_of_their_own(client, db_conn):
+    """Il client EEG non conosce l'utente Moodle: senza un evento del plugin
+    che lo dichiari, non c'è nulla da attribuire e la riga resta nulla."""
     post(client, [
         {"session_id": "s1", "timestamp": 1786544600.0, "source": "eeg",
          "event_type": "session_start", "payload": {}},
@@ -484,3 +515,153 @@ def test_user_id_is_not_part_of_the_uniqueness_key(client, db_conn):
 
     assert body["stored"] == 1
     assert body["duplicates"] == 1
+
+
+# --------------------------------------------------------------------- #
+#  attribuzione degli eventi EEG allo studente                          #
+# --------------------------------------------------------------------- #
+#
+#  Il client EEG non conosce l'utente Moodle e non lo manderà mai. L'unica
+#  cosa che le due sorgenti condividono è il session_id: il backend impara
+#  l'utente dal plugin e lo estende a tutte le righe della sessione.
+
+def test_eeg_events_inherit_the_user_learned_from_moodle(client, db_conn):
+    """Il caso normale: il plugin dichiara lo studente, i campioni EEG che
+    arrivano dopo (allo Stop) ne ereditano l'attribuzione."""
+    start_session(client)
+    post(client, [moodle_event(1786544600.0, user_id=7)])
+
+    post(client, [eeg_sample(1786544700.0), eeg_sample(1786544701.0)])
+
+    assert user_ids_of(db_conn, "eeg") == [7, 7, 7]  # session_start compreso
+
+
+def test_session_start_is_backfilled_when_the_user_becomes_known(client, db_conn):
+    """session_start precede sempre il primo evento Moodle: quella riga non
+    si può attribuire in corsa, la recupera la UPDATE di ripescaggio."""
+    start_session(client)
+    assert user_ids_of(db_conn, "eeg") == [None]
+
+    post(client, [moodle_event(1786544600.0, user_id=7)])
+
+    assert user_ids_of(db_conn, "eeg") == [7]
+
+
+def test_eeg_batch_sent_before_any_moodle_activity_is_backfilled(client, db_conn):
+    """Sessione registrata prima che lo studente tocchi il browser: le righe
+    esistono già quando l'utente si scopre, e vanno recuperate a ritroso."""
+    start_session(client)
+    post(client, [eeg_sample(1786544700.0), eeg_sample(1786544701.0)])
+
+    body = post(client, [moodle_event(1786544800.0, user_id=7)]).get_json()
+
+    assert body["rows_attributed"] == 3
+    assert user_ids_of(db_conn, "eeg") == [7, 7, 7]
+
+
+def test_events_are_attributed_within_a_single_batch(client, db_conn):
+    """Le entry si assemblano tutte prima dell'INSERT: un campione che nel
+    lotto precede l'evento Moodle non può leggere l'utente al momento della
+    costruzione. Senza il ripescaggio, resterebbe nullo."""
+    start_session(client)
+
+    post(client, [eeg_sample(1786544700.0), moodle_event(1786544800.0, user_id=7)])
+
+    assert user_ids_of(db_conn, "eeg") == [7, 7]
+    assert user_ids_of(db_conn, "moodle") == [7]
+
+
+def test_the_first_user_seen_wins_for_the_whole_session(client, db_conn):
+    """Una sessione è di uno studente solo. Un secondo user_id sulla stessa
+    sessione (due account sulla stessa macchina) non riscrive l'attribuzione
+    già data: resterebbero righe EEG assegnate a due studenti diversi senza
+    modo di dire quale sia quella giusta."""
+    start_session(client)
+    post(client, [moodle_event(1786544600.0, user_id=7)])
+    post(client, [moodle_event(1786544700.0, user_id=99)])
+
+    post(client, [eeg_sample(1786544800.0)])
+
+    assert session_user_id(db_conn, "s1") == 7
+    assert user_ids_of(db_conn, "eeg") == [7, 7]
+    # L'evento del secondo utente conserva il proprio user_id: è un dato
+    # osservato, non un'inferenza, e non va riscritto.
+    assert user_ids_of(db_conn, "moodle") == [7, 99]
+
+
+def test_a_moodle_event_without_user_id_inherits_the_session_user(client, db_conn):
+    """Non tutti gli eventi del plugin portano context: quelli che ne sono
+    privi sono comunque dello studente della sessione."""
+    start_session(client)
+    post(client, [moodle_event(1786544600.0, user_id=7)])
+
+    post(client, [moodle_event(1786544700.0, event_type="navigation_clicked")])
+
+    assert user_ids_of(db_conn, "moodle") == [7, 7]
+
+
+def test_attribution_does_not_leak_across_sessions(client, db_conn):
+    """Lo studente sta sulla sessione, non sul backend: una sessione nuova
+    riparte senza utente finché non arriva un suo evento Moodle."""
+    start_session(client, "s1")
+    post(client, [moodle_event(1786544600.0, user_id=7)])
+    start_session(client, "s2", ts=1786544700.0)  # supersede di s1
+
+    post(client, [eeg_sample(1786544800.0, session_id="s2")])
+
+    assert session_user_id(db_conn, "s2") is None
+    assert user_ids_of(db_conn, "eeg") == [7, None, None]
+
+
+def test_the_session_user_is_persisted(client, db_conn):
+    """La colonna su 'sessions' è la fonte autorevole: serve a interrogare le
+    sessioni per studente e a sopravvivere al riavvio."""
+    start_session(client)
+
+    post(client, [moodle_event(1786544600.0, user_id=7)])
+
+    assert session_user_id(db_conn, "s1") == 7
+
+
+def test_attribution_survives_a_backend_restart(db_path, db_conn):
+    """I campioni di una sessione arrivano allo Stop e possono cadere dopo un
+    riavvio: lo stato in memoria è perso, l'attribuzione no perché la rilegge
+    dal database."""
+    class _AppConfig(TestConfig):
+        DB_PATH = db_path
+
+    first = create_app(_AppConfig).test_client()
+    start_session(first)
+    post(first, [moodle_event(1786544600.0, user_id=7)])
+
+    restarted = create_app(_AppConfig).test_client()
+    post(restarted, [eeg_sample(1786544700.0)])
+
+    assert user_ids_of(db_conn, "eeg") == [7, 7]
+
+
+def test_nothing_is_attributed_when_no_user_is_ever_known(client, db_conn):
+    """Nessun evento Moodle, nessuna invenzione: le righe restano nulle e il
+    contatore lo dice."""
+    start_session(client)
+
+    body = post(client, [eeg_sample(1786544700.0)]).get_json()
+
+    assert body["rows_attributed"] == 0
+    assert user_ids_of(db_conn, "eeg") == [None, None]
+
+
+def test_events_outside_any_session_are_not_attributed(client, db_conn):
+    """Senza sessione attiva l'evento Moodle finisce con session_id nullo: non
+    c'è nessuna sessione a cui appendere lo studente, e le righe di altre
+    sessioni non devono ereditarlo."""
+    start_session(client)
+    post(client, [moodle_event(1786544600.0, user_id=7)])
+    post(client, [{"session_id": "s1", "timestamp": 1786544700.0, "source": "eeg",
+                   "event_type": "session_end", "payload": {}}])
+
+    post(client, [moodle_event(1786544800.0, user_id=99)])
+
+    rows = [row for row in timeline_rows(db_conn) if row[0] is None]
+    assert [row[6] for row in rows] == [99]
+    assert session_user_id(db_conn, "s1") == 7
